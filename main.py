@@ -226,6 +226,68 @@ async def root():
         "resources_count": len(RESOURCES)
     }
 
+@app.post("/")
+async def root_post(request: Request):
+    """Handle MCP requests at root endpoint for clients that don't specify /mcp"""
+    try:
+        data = await request.json()
+        
+        # Convert to MCPRequest format
+        if isinstance(data, dict):
+            mcp_request = MCPRequest(
+                jsonrpc=data.get("jsonrpc", "2.0"),
+                id=data.get("id"),
+                method=data.get("method", ""),
+                params=data.get("params")
+            )
+        else:
+            mcp_request = MCPRequest(**data)
+        
+        return await mcp_handler(mcp_request)
+    except Exception as e:
+        return MCPResponse(
+            error={
+                "code": -32700,
+                "message": f"Parse error: {str(e)}"
+            }
+        )
+
+@app.get("/sse")
+async def sse_endpoint():
+    """SSE endpoint for MCP clients that expect Server-Sent Events"""
+    async def event_stream():
+        # Send initial connection established event
+        yield f"data: {json.dumps({'type': 'connection', 'status': 'established'})}\n\n"
+        
+        # Keep connection alive with periodic pings
+        while True:
+            await asyncio.sleep(30)  # Send ping every 30 seconds
+            yield f"data: {json.dumps({'type': 'ping', 'timestamp': datetime.now().isoformat()})}\n\n"
+    
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+@app.options("/")
+async def root_options():
+    """Handle OPTIONS requests for CORS"""
+    return {
+        "message": "MCP Server supports POST requests",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "headers": {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    }
+
 @app.post("/mcp")
 async def mcp_handler(request: MCPRequest):
     """Main MCP protocol handler - supports both regular HTTP and MCP client connections"""
