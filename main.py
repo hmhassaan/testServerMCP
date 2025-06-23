@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, List, Any, Optional
@@ -20,7 +20,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Custom JSON encoder for proper MCP response formatting
+class MCPJSONResponse(JSONResponse):
+    def render(self, content) -> bytes:
+        if hasattr(content, 'dict'):
+            # Handle Pydantic models
+            content_dict = content.dict(exclude_none=True)
+        else:
+            content_dict = content
+        
+        return json.dumps(content_dict, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+
 # MCP Protocol Models
+class MCPError(BaseModel):
+    code: int
+    message: str
+    data: Optional[Any] = None
+
 class MCPRequest(BaseModel):
     jsonrpc: str = "2.0"
     id: Optional[int] = None
@@ -31,7 +47,10 @@ class MCPResponse(BaseModel):
     jsonrpc: str = "2.0"
     id: Optional[int] = None
     result: Optional[Dict[str, Any]] = None
-    error: Optional[Dict[str, Any]] = None
+    error: Optional[MCPError] = None
+
+    class Config:
+        exclude_none = True
 
 class Tool(BaseModel):
     name: str
@@ -226,7 +245,7 @@ async def root():
         "resources_count": len(RESOURCES)
     }
 
-@app.post("/")
+@app.post("/", response_class=MCPJSONResponse)
 async def root_post(request: Request):
     """Handle MCP requests at root endpoint for clients that don't specify /mcp"""
     try:
@@ -246,10 +265,10 @@ async def root_post(request: Request):
         return await mcp_handler(mcp_request)
     except Exception as e:
         return MCPResponse(
-            error={
-                "code": -32700,
-                "message": f"Parse error: {str(e)}"
-            }
+            error=MCPError(
+                code=-32700,
+                message=f"Parse error: {str(e)}"
+            )
         )
 
 @app.get("/sse")
@@ -288,7 +307,7 @@ async def root_options():
         }
     }
 
-@app.post("/mcp")
+@app.post("/mcp", response_class=MCPJSONResponse)
 async def mcp_handler(request: MCPRequest):
     """Main MCP protocol handler - supports both regular HTTP and MCP client connections"""
     
@@ -330,10 +349,10 @@ async def mcp_handler(request: MCPRequest):
             if tool_name not in TOOL_EXECUTORS:
                 return MCPResponse(
                     id=request.id,
-                    error={
-                        "code": -32601,
-                        "message": f"Tool '{tool_name}' not found"
-                    }
+                    error=MCPError(
+                        code=-32601,
+                        message=f"Tool '{tool_name}' not found"
+                    )
                 )
             
             try:
@@ -352,10 +371,10 @@ async def mcp_handler(request: MCPRequest):
             except Exception as e:
                 return MCPResponse(
                     id=request.id,
-                    error={
-                        "code": -32603,
-                        "message": f"Tool execution failed: {str(e)}"
-                    }
+                    error=MCPError(
+                        code=-32603,
+                        message=f"Tool execution failed: {str(e)}"
+                    )
                 )
         
         elif request.method == "resources/list":
@@ -409,10 +428,10 @@ async def mcp_handler(request: MCPRequest):
             else:
                 return MCPResponse(
                     id=request.id,
-                    error={
-                        "code": -32601,
-                        "message": f"Resource '{uri}' not found"
-                    }
+                    error=MCPError(
+                        code=-32601,
+                        message=f"Resource '{uri}' not found"
+                    )
                 )
         
         elif request.method == "ping":
@@ -421,23 +440,23 @@ async def mcp_handler(request: MCPRequest):
         else:
             return MCPResponse(
                 id=request.id,
-                error={
-                    "code": -32601,
-                    "message": f"Method '{request.method}' not implemented"
-                }
+                error=MCPError(
+                    code=-32601,
+                    message=f"Method '{request.method}' not implemented"
+                )
             )
     
     except Exception as e:
         return MCPResponse(
             id=request.id,
-            error={
-                "code": -32603,
-                "message": f"Internal server error: {str(e)}"
-            }
+            error=MCPError(
+                code=-32603,
+                message=f"Internal server error: {str(e)}"
+            )
         )
 
 # Alternative endpoint that accepts raw JSON for MCP clients that don't use JSON-RPC wrapper
-@app.post("/mcp/raw")
+@app.post("/mcp/raw", response_class=MCPJSONResponse)
 async def mcp_raw_handler(request: Request):
     """Raw MCP handler for clients that send unwrapped requests"""
     try:
