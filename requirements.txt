@@ -1,4 +1,73 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-pydantic==2.5.0
-python-multipart==0.0.6
+# requirements.txt
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+httpx>=0.25.0
+python-multipart>=0.0.6
+
+# setup.py (optional - for package installation)
+from setuptools import setup, find_packages
+
+setup(
+    name="python-mcp-server",
+    version="1.0.0",
+    description="Model Context Protocol Server with Python and FastAPI",
+    packages=find_packages(),
+    install_requires=[
+        "fastapi>=0.104.0",
+        "uvicorn[standard]>=0.24.0", 
+        "pydantic>=2.5.0",
+        "httpx>=0.25.0",
+        "python-multipart>=0.0.6",
+    ],
+    python_requires=">=3.8",
+    entry_points={
+        "console_scripts": [
+            "mcp-server=main:main",
+        ],
+    },
+)
+
+# Dockerfile (optional - for containerization)
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 8000
+
+CMD ["python", "main.py", "--host", "0.0.0.0", "--port", "8000"]
+
+# docker-compose.yml (optional)
+version: '3.8'
+
+services:
+  mcp-server:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - LOG_LEVEL=info
+    restart: unless-stopped
+
+# Railway deployment (railway.toml)
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+numReplicas = 1
+sleepApplication = false
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+[[deploy.environmentVariables]]
+name = "PORT"
+value = "8000"
+
+[[deploy.environmentVariables]]
+name = "HOST" 
+value = "0.0.0.0"

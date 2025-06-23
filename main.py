@@ -1,17 +1,327 @@
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Dict, List, Any, Optional
-import json
+#!/usr/bin/env python3
+"""
+Model Context Protocol (MCP) Server with FastAPI
+A complete MCP server implementation supporting HTTP transport
+"""
+
 import asyncio
+import json
+import logging
 from datetime import datetime
-import random
-import math
+from typing import Any, Dict, List, Optional, Union
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="MCP Test Server", version="1.0.0")
+import httpx
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+import uvicorn
 
-# Add CORS middleware for web clients
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# MCP Protocol Models
+class MCPRequest(BaseModel):
+    jsonrpc: str = "2.0"
+    id: Union[str, int, None] = None
+    method: str
+    params: Optional[Dict[str, Any]] = None
+
+class MCPResponse(BaseModel):
+    jsonrpc: str = "2.0"
+    id: Union[str, int, None] = None
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[Dict[str, Any]] = None
+
+class MCPNotification(BaseModel):
+    jsonrpc: str = "2.0"
+    method: str
+    params: Optional[Dict[str, Any]] = None
+
+# Tool Schema Models
+class ToolSchema(BaseModel):
+    type: str = "object"
+    properties: Dict[str, Any] = Field(default_factory=dict)
+    required: List[str] = Field(default_factory=list)
+
+class Tool(BaseModel):
+    name: str
+    description: str
+    inputSchema: ToolSchema
+
+# Server Implementation
+class MCPServer:
+    def __init__(self):
+        self.tools: Dict[str, Tool] = {}
+        self.resources: Dict[str, Any] = {}
+        self.prompts: Dict[str, Any] = {}
+        self._setup_default_tools()
+    
+    def _setup_default_tools(self):
+        """Setup default tools for demonstration"""
+        
+        # Weather tool
+        weather_tool = Tool(
+            name="get_weather",
+            description="Get current weather information for a location",
+            inputSchema=ToolSchema(
+                type="object",
+                properties={
+                    "location": {
+                        "type": "string",
+                        "description": "The city and state, e.g. San Francisco, CA"
+                    },
+                    "unit": {
+                        "type": "string",
+                        "enum": ["celsius", "fahrenheit"],
+                        "description": "Temperature unit",
+                        "default": "fahrenheit"
+                    }
+                },
+                required=["location"]
+            )
+        )
+        self.tools["get_weather"] = weather_tool
+        
+        # Calculator tool
+        calc_tool = Tool(
+            name="calculate",
+            description="Perform basic mathematical calculations",
+            inputSchema=ToolSchema(
+                type="object",
+                properties={
+                    "expression": {
+                        "type": "string",
+                        "description": "Mathematical expression to evaluate (e.g., '2 + 2', '10 * 5')"
+                    }
+                },
+                required=["expression"]
+            )
+        )
+        self.tools["calculate"] = calc_tool
+        
+        # Time tool
+        time_tool = Tool(
+            name="get_current_time",
+            description="Get the current date and time",
+            inputSchema=ToolSchema(
+                type="object",
+                properties={
+                    "timezone": {
+                        "type": "string",
+                        "description": "Timezone (optional, defaults to UTC)",
+                        "default": "UTC"
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Date format (optional, defaults to ISO format)",
+                        "default": "iso"
+                    }
+                },
+                required=[]
+            )
+        )
+        self.tools["get_current_time"] = time_tool
+    
+    async def handle_initialize(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Handle MCP initialize request"""
+        return {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": {
+                    "listChanged": True
+                },
+                "resources": {
+                    "subscribe": True,
+                    "listChanged": True
+                },
+                "prompts": {
+                    "listChanged": True
+                }
+            },
+            "serverInfo": {
+                "name": "python-mcp-server",
+                "version": "1.0.0",
+                "description": "A Python MCP server with multiple tools"
+            }
+        }
+    
+    async def handle_tools_list(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Handle tools/list request"""
+        tools_list = []
+        for tool in self.tools.values():
+            tools_list.append({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.inputSchema.model_dump()
+            })
+        
+        return {"tools": tools_list}
+    
+    async def handle_tools_call(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle tools/call request"""
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
+        
+        if tool_name not in self.tools:
+            raise ValueError(f"Unknown tool: {tool_name}")
+        
+        # Execute the tool
+        if tool_name == "get_weather":
+            return await self._execute_weather_tool(arguments)
+        elif tool_name == "calculate":
+            return await self._execute_calculator_tool(arguments)
+        elif tool_name == "get_current_time":
+            return await self._execute_time_tool(arguments)
+        else:
+            raise ValueError(f"Tool execution not implemented: {tool_name}")
+    
+    async def _execute_weather_tool(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute weather tool"""
+        location = args.get("location")
+        unit = args.get("unit", "fahrenheit")
+        
+        # Mock weather data (in a real implementation, you'd call a weather API)
+        weather_data = {
+            "location": location,
+            "temperature": 72 if unit == "fahrenheit" else 22,
+            "unit": unit,
+            "condition": "Partly cloudy",
+            "humidity": 65,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"Weather for {location}: {weather_data['temperature']}°{unit[0].upper()}, {weather_data['condition']}, Humidity: {weather_data['humidity']}%"
+                }
+            ],
+            "isError": False
+        }
+    
+    async def _execute_calculator_tool(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute calculator tool"""
+        expression = args.get("expression", "")
+        
+        try:
+            # Safe evaluation of mathematical expressions
+            allowed_chars = set('0123456789+-*/().')
+            if not all(c in allowed_chars or c.isspace() for c in expression):
+                raise ValueError("Invalid characters in expression")
+            
+            result = eval(expression)
+            
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"{expression} = {result}"
+                    }
+                ],
+                "isError": False
+            }
+        except Exception as e:
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Error calculating '{expression}': {str(e)}"
+                    }
+                ],
+                "isError": True
+            }
+    
+    async def _execute_time_tool(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute time tool"""
+        timezone = args.get("timezone", "UTC")
+        format_type = args.get("format", "iso")
+        
+        current_time = datetime.now()
+        
+        if format_type == "iso":
+            time_str = current_time.isoformat()
+        else:
+            time_str = current_time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"Current time ({timezone}): {time_str}"
+                }
+            ],
+            "isError": False
+        }
+    
+    async def handle_resources_list(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Handle resources/list request"""
+        return {"resources": []}
+    
+    async def handle_prompts_list(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Handle prompts/list request"""
+        return {"prompts": []}
+    
+    async def process_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process MCP request and return response"""
+        method = request_data.get("method")
+        params = request_data.get("params")
+        request_id = request_data.get("id")
+        
+        try:
+            if method == "initialize":
+                result = await self.handle_initialize(params)
+            elif method == "tools/list":
+                result = await self.handle_tools_list(params)
+            elif method == "tools/call":
+                result = await self.handle_tools_call(params)
+            elif method == "resources/list":
+                result = await self.handle_resources_list(params)
+            elif method == "prompts/list":
+                result = await self.handle_prompts_list(params)
+            else:
+                raise ValueError(f"Unknown method: {method}")
+            
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": result
+            }
+        
+        except Exception as e:
+            logger.error(f"Error processing request {method}: {str(e)}")
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {
+                    "code": -32603,
+                    "message": "Internal error",
+                    "data": str(e)
+                }
+            }
+
+# Global server instance
+mcp_server = MCPServer()
+
+# FastAPI setup
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for FastAPI"""
+    logger.info("Starting MCP Server...")
+    yield
+    logger.info("Shutting down MCP Server...")
+
+app = FastAPI(
+    title="Python MCP Server",
+    description="Model Context Protocol Server with Python and FastAPI",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,485 +330,98 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Custom JSON encoder for proper MCP response formatting
-class MCPJSONResponse(JSONResponse):
-    def render(self, content) -> bytes:
-        if hasattr(content, 'dict'):
-            # Handle Pydantic models
-            content_dict = content.dict(exclude_none=True)
-        else:
-            content_dict = content
-        
-        return json.dumps(content_dict, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-
-# MCP Protocol Models
-class MCPError(BaseModel):
-    code: int
-    message: str
-    data: Optional[Any] = None
-
-class MCPRequest(BaseModel):
-    jsonrpc: str = "2.0"
-    id: Optional[int] = None
-    method: str
-    params: Optional[Dict[str, Any]] = None
-
-class MCPResponse(BaseModel):
-    jsonrpc: str = "2.0"
-    id: Optional[int] = None
-    result: Optional[Dict[str, Any]] = None
-    error: Optional[MCPError] = None
-
-    class Config:
-        exclude_none = True
-
-class Tool(BaseModel):
-    name: str
-    description: str
-    inputSchema: Dict[str, Any]
-
-class Resource(BaseModel):
-    uri: str
-    name: str
-    description: Optional[str] = None
-    mimeType: Optional[str] = None
-
-# Example tools configuration
-TOOLS = [
-    Tool(
-        name="echo",
-        description="Echo back the input text with a timestamp",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "text": {
-                    "type": "string",
-                    "description": "Text to echo back"
-                }
-            },
-            "required": ["text"]
-        }
-    ),
-    Tool(
-        name="calculate",
-        description="Perform basic mathematical calculations",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "expression": {
-                    "type": "string",
-                    "description": "Mathematical expression to evaluate (e.g., '2 + 2', '10 * 5')"
-                }
-            },
-            "required": ["expression"]
-        }
-    ),
-    Tool(
-        name="random_number",
-        description="Generate a random number within a specified range",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "min": {
-                    "type": "number",
-                    "description": "Minimum value (default: 1)"
-                },
-                "max": {
-                    "type": "number",
-                    "description": "Maximum value (default: 100)"
-                }
-            }
-        }
-    ),
-    Tool(
-        name="get_time",
-        description="Get current date and time information",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "format": {
-                    "type": "string",
-                    "description": "Time format: 'iso', 'timestamp', or 'readable' (default: 'readable')"
-                }
-            }
-        }
-    ),
-    Tool(
-        name="word_count",
-        description="Count words, characters, and lines in text",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "text": {
-                    "type": "string",
-                    "description": "Text to analyze"
-                }
-            },
-            "required": ["text"]
-        }
-    )
-]
-
-RESOURCES = [
-    Resource(
-        uri="memory://server-info",
-        name="Server Information",
-        description="Information about this MCP test server",
-        mimeType="application/json"
-    ),
-    Resource(
-        uri="memory://available-tools",
-        name="Available Tools",
-        description="List of all available tools on this server",
-        mimeType="application/json"
-    )
-]
-
-# Tool implementations
-async def execute_echo(params: Dict[str, Any]) -> Dict[str, Any]:
-    text = params.get("text", "")
-    timestamp = datetime.now().isoformat()
-    return {
-        "echoed_text": text,
-        "timestamp": timestamp,
-        "message": f"Echo at {timestamp}: {text}"
-    }
-
-async def execute_calculate(params: Dict[str, Any]) -> Dict[str, Any]:
-    expression = params.get("expression", "")
-    try:
-        # Safe evaluation of mathematical expressions
-        allowed_chars = set("0123456789+-*/.()")
-        if not all(c in allowed_chars or c.isdigit() or c.isspace() for c in expression):
-            raise ValueError("Invalid characters in expression")
-        
-        result = eval(expression)
-        return {
-            "expression": expression,
-            "result": result,
-            "type": type(result).__name__
-        }
-    except Exception as e:
-        return {
-            "error": f"Calculation failed: {str(e)}",
-            "expression": expression
-        }
-
-async def execute_random_number(params: Dict[str, Any]) -> Dict[str, Any]:
-    min_val = params.get("min", 1)
-    max_val = params.get("max", 100)
-    
-    if min_val > max_val:
-        min_val, max_val = max_val, min_val
-    
-    number = random.randint(int(min_val), int(max_val))
-    return {
-        "random_number": number,
-        "range": f"{min_val} to {max_val}",
-        "timestamp": datetime.now().isoformat()
-    }
-
-async def execute_get_time(params: Dict[str, Any]) -> Dict[str, Any]:
-    format_type = params.get("format", "readable")
-    now = datetime.now()
-    
-    if format_type == "iso":
-        return {"time": now.isoformat(), "format": "ISO 8601"}
-    elif format_type == "timestamp":
-        return {"time": now.timestamp(), "format": "Unix timestamp"}
-    else:  # readable
-        return {"time": now.strftime("%Y-%m-%d %H:%M:%S"), "format": "Human readable"}
-
-async def execute_word_count(params: Dict[str, Any]) -> Dict[str, Any]:
-    text = params.get("text", "")
-    
-    words = len(text.split())
-    characters = len(text)
-    characters_no_spaces = len(text.replace(" ", ""))
-    lines = len(text.split("\n"))
-    
-    return {
-        "text_length": characters,
-        "word_count": words,
-        "character_count": characters,
-        "character_count_no_spaces": characters_no_spaces,
-        "line_count": lines,
-        "average_words_per_line": round(words / max(lines, 1), 2)
-    }
-
-# Tool execution mapping
-TOOL_EXECUTORS = {
-    "echo": execute_echo,
-    "calculate": execute_calculate,
-    "random_number": execute_random_number,
-    "get_time": execute_get_time,
-    "word_count": execute_word_count
-}
-
 @app.get("/")
 async def root():
+    """Root endpoint"""
     return {
-        "message": "MCP Test Server Running!",
-        "protocol": "Model Context Protocol",
+        "message": "Python MCP Server",
         "version": "1.0.0",
-        "tools_count": len(TOOLS),
-        "resources_count": len(RESOURCES)
+        "protocol": "Model Context Protocol",
+        "status": "running"
     }
 
-@app.post("/", response_class=MCPJSONResponse)
-async def root_post(request: Request):
-    """Handle MCP requests at root endpoint for clients that don't specify /mcp"""
-    try:
-        data = await request.json()
-        
-        # Convert to MCPRequest format
-        if isinstance(data, dict):
-            mcp_request = MCPRequest(
-                jsonrpc=data.get("jsonrpc", "2.0"),
-                id=data.get("id"),
-                method=data.get("method", ""),
-                params=data.get("params")
-            )
-        else:
-            mcp_request = MCPRequest(**data)
-        
-        return await mcp_handler(mcp_request)
-    except Exception as e:
-        return MCPResponse(
-            error=MCPError(
-                code=-32700,
-                message=f"Parse error: {str(e)}"
-            )
-        )
-
-@app.get("/sse")
-async def sse_endpoint():
-    """SSE endpoint for MCP clients that expect Server-Sent Events"""
-    async def event_stream():
-        # Send initial connection established event
-        yield f"data: {json.dumps({'type': 'connection', 'status': 'established'})}\n\n"
-        
-        # Keep connection alive with periodic pings
-        while True:
-            await asyncio.sleep(30)  # Send ping every 30 seconds
-            yield f"data: {json.dumps({'type': 'ping', 'timestamp': datetime.now().isoformat()})}\n\n"
-    
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "*",
-        }
-    )
-
-@app.options("/")
-async def root_options():
-    """Handle OPTIONS requests for CORS"""
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
     return {
-        "message": "MCP Server supports POST requests",
-        "methods": ["GET", "POST", "OPTIONS"],
-        "headers": {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-        }
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "tools_count": len(mcp_server.tools)
     }
 
-@app.post("/mcp", response_class=MCPJSONResponse)
-async def mcp_handler(request: MCPRequest):
-    """Main MCP protocol handler - supports both regular HTTP and MCP client connections"""
-    
+@app.post("/mcp")
+async def mcp_endpoint(request: Request):
+    """Main MCP endpoint for handling protocol requests"""
     try:
-        if request.method == "initialize":
-            return MCPResponse(
-                id=request.id,
-                result={
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": {},
-                        "resources": {},
-                        "logging": {}
-                    },
-                    "serverInfo": {
-                        "name": "MCP Test Server",
-                        "version": "1.0.0"
-                    }
-                }
-            )
+        # Parse request body
+        body = await request.body()
+        request_data = json.loads(body.decode('utf-8'))
         
-        elif request.method == "initialized":
-            # Acknowledge initialization complete
-            return MCPResponse(id=request.id, result={})
+        logger.info(f"Received MCP request: {request_data.get('method', 'unknown')}")
         
-        elif request.method == "tools/list":
-            return MCPResponse(
-                id=request.id,
-                result={
-                    "tools": [tool.dict() for tool in TOOLS]
-                }
-            )
+        # Process the MCP request
+        response_data = await mcp_server.process_request(request_data)
         
-        elif request.method == "tools/call":
-            params = request.params or {}
-            tool_name = params.get("name")
-            tool_arguments = params.get("arguments", {})
-            
-            if tool_name not in TOOL_EXECUTORS:
-                return MCPResponse(
-                    id=request.id,
-                    error=MCPError(
-                        code=-32601,
-                        message=f"Tool '{tool_name}' not found"
-                    )
-                )
-            
-            try:
-                result = await TOOL_EXECUTORS[tool_name](tool_arguments)
-                return MCPResponse(
-                    id=request.id,
-                    result={
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": json.dumps(result, indent=2)
-                            }
-                        ]
-                    }
-                )
-            except Exception as e:
-                return MCPResponse(
-                    id=request.id,
-                    error=MCPError(
-                        code=-32603,
-                        message=f"Tool execution failed: {str(e)}"
-                    )
-                )
+        logger.info(f"Sending MCP response for: {request_data.get('method', 'unknown')}")
         
-        elif request.method == "resources/list":
-            return MCPResponse(
-                id=request.id,
-                result={
-                    "resources": [resource.dict() for resource in RESOURCES]
-                }
-            )
-        
-        elif request.method == "resources/read":
-            params = request.params or {}
-            uri = params.get("uri")
-            
-            if uri == "memory://server-info":
-                content = {
-                    "server_name": "MCP Test Server",
-                    "version": "1.0.0",
-                    "protocol_version": "2024-11-05",
-                    "tools_available": len(TOOLS),
-                    "resources_available": len(RESOURCES),
-                    "uptime": "Runtime information not tracked"
-                }
-                return MCPResponse(
-                    id=request.id,
-                    result={
-                        "contents": [
-                            {
-                                "uri": uri,
-                                "mimeType": "application/json",
-                                "text": json.dumps(content, indent=2)
-                            }
-                        ]
-                    }
-                )
-            
-            elif uri == "memory://available-tools":
-                return MCPResponse(
-                    id=request.id,
-                    result={
-                        "contents": [
-                            {
-                                "uri": uri,
-                                "mimeType": "application/json",
-                                "text": json.dumps([tool.dict() for tool in TOOLS], indent=2)
-                            }
-                        ]
-                    }
-                )
-            
-            else:
-                return MCPResponse(
-                    id=request.id,
-                    error=MCPError(
-                        code=-32601,
-                        message=f"Resource '{uri}' not found"
-                    )
-                )
-        
-        elif request.method == "ping":
-            return MCPResponse(id=request.id, result={})
-        
-        else:
-            return MCPResponse(
-                id=request.id,
-                error=MCPError(
-                    code=-32601,
-                    message=f"Method '{request.method}' not implemented"
-                )
-            )
+        return JSONResponse(content=response_data)
     
-    except Exception as e:
-        return MCPResponse(
-            id=request.id,
-            error=MCPError(
-                code=-32603,
-                message=f"Internal server error: {str(e)}"
-            )
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error: {str(e)}")
+        return JSONResponse(
+            status_code=400,
+            content={
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32700,
+                    "message": "Parse error",
+                    "data": str(e)
+                }
+            }
         )
-
-# Alternative endpoint that accepts raw JSON for MCP clients that don't use JSON-RPC wrapper
-@app.post("/mcp/raw", response_class=MCPJSONResponse)
-async def mcp_raw_handler(request: Request):
-    """Raw MCP handler for clients that send unwrapped requests"""
-    try:
-        data = await request.json()
-        
-        # Wrap in MCP request format if not already wrapped
-        if "jsonrpc" not in data:
-            mcp_request = MCPRequest(
-                method=data.get("method", ""),
-                params=data.get("params"),
-                id=data.get("id")
-            )
-        else:
-            mcp_request = MCPRequest(**data)
-        
-        return await mcp_handler(mcp_request)
-    
     except Exception as e:
-        return MCPResponse(
-            error={
-                "code": -32700,
-                "message": f"Parse error: {str(e)}"
+        logger.error(f"Unexpected error: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32603,
+                    "message": "Internal error",
+                    "data": str(e)
+                }
             }
         )
 
-# Legacy endpoint for backward compatibility
-@app.post("/message")
-async def receive_message(request: Request):
-    data = await request.json()
-    return {"status": "received", "data": data, "note": "Use /mcp endpoint for MCP protocol"}
-
-# Health check endpoint
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "protocol": "MCP",
-        "tools": len(TOOLS),
-        "resources": len(RESOURCES),
-        "timestamp": datetime.now().isoformat()
-    }
+@app.get("/tools")
+async def list_tools():
+    """List available tools (convenience endpoint)"""
+    tools_result = await mcp_server.handle_tools_list()
+    return tools_result
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Python MCP Server")
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
+    parser.add_argument("--log-level", default="info", help="Log level")
+    
+    args = parser.parse_args()
+    
+    # Configure uvicorn logging
+    log_config = uvicorn.config.LOGGING_CONFIG
+    log_config["formatters"]["default"]["fmt"] = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    log_config["formatters"]["access"]["fmt"] = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    
+    logger.info(f"Starting MCP Server on {args.host}:{args.port}")
+    
+    uvicorn.run(
+        "main:app",
+        host=args.host,
+        port=args.port,
+        log_level=args.log_level,
+        reload=False
+    )
